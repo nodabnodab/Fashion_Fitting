@@ -109,7 +109,7 @@ class PoseController:
         pose_image: Image.Image,
         prompt: str,
         negative_prompt: str = "",
-        controlnet_conditioning_scale: float = 0.8,
+        controlnet_conditioning_scale: float = 0.95,
         num_steps: int = 30,
         seed: Optional[int] = None,
     ) -> Image.Image:

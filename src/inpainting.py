@@ -55,13 +55,21 @@ class FashionInpainter:
         Args:
             enable_xformers: 메모리 최적화 (VRAM 부족 시 효과적)
         """
-        from diffusers import StableDiffusionInpaintPipeline
+        from diffusers import StableDiffusionControlNetInpaintPipeline, ControlNetModel
 
         print(f"[FashionInpainter] 모델 로딩: {self.model_path}")
         print("  (처음 실행 시 HuggingFace에서 다운로드됩니다. 수GB 용량)")
 
-        self.pipe = StableDiffusionInpaintPipeline.from_pretrained(
+        # ControlNet Canny 로드 (약 1.5GB)
+        print("[FashionInpainter] ControlNet Canny 모델 로딩 중...")
+        controlnet = ControlNetModel.from_pretrained(
+            "lllyasviel/sd-controlnet-canny",
+            torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
+        )
+
+        self.pipe = StableDiffusionControlNetInpaintPipeline.from_pretrained(
             self.model_path,
+            controlnet=controlnet,
             torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
             safety_checker=None,  # 포트폴리오용으로 비활성화
         )
@@ -110,6 +118,8 @@ class FashionInpainter:
         negative_prompt: str = "",
         num_steps: int = 30,
         guidance_scale: float = 7.5,
+        strength: float = 0.85,
+        controlnet_scale: float = 0.5,
         seed: Optional[int] = None,
     ) -> Image.Image:
         """
@@ -136,6 +146,21 @@ class FashionInpainter:
         target_size = (512, 512)
         person_resized = person_image.resize(target_size).convert("RGB")
         mask_resized = mask_image.resize(target_size).convert("L")
+
+        # ControlNet Canny 이미지 생성 (원본 옷의 주름/형태 보존용)
+        import cv2
+        import numpy as np
+        person_np = np.array(person_resized)
+        
+        # Canny Edge 추출
+        canny_np = cv2.Canny(person_np, 100, 200)
+        
+        # 마스크 밖의 엣지는 지움 (배경 노이즈가 옷으로 변형되는 것 방지)
+        mask_np = np.array(mask_resized)
+        canny_np = canny_np * (mask_np > 128)
+        
+        # 3채널 이미지로 변환
+        canny_image = Image.fromarray(cv2.cvtColor(canny_np, cv2.COLOR_GRAY2RGB))
 
         # 기본 negative prompt
         default_negative = (
@@ -166,8 +191,11 @@ class FashionInpainter:
                 negative_prompt=full_negative,
                 image=person_resized,
                 mask_image=mask_resized,
+                control_image=canny_image,
+                controlnet_conditioning_scale=controlnet_scale,
                 num_inference_steps=num_steps,
                 guidance_scale=guidance_scale,
+                strength=strength,
                 generator=generator,
             )
 
@@ -177,7 +205,13 @@ class FashionInpainter:
         if person_image.size != target_size:
             output_image = output_image.resize(person_image.size, Image.LANCZOS)
 
-        print("[FashionInpainter] 생성 완료!")
+        # 100% 완벽한 원본 보존을 위한 수동 마스크 합성 (Composite)
+        # 생성된 이미지는 마스크 영역(옷)에만 적용하고, 나머지 영역(얼굴/배경)은 원본 픽셀을 그대로 덮어씌움
+        from PIL import ImageFilter
+        blur_mask = mask_image.filter(ImageFilter.GaussianBlur(radius=3))
+        output_image = Image.composite(output_image, person_image.convert("RGB"), blur_mask)
+
+        print("[FashionInpainter] 생성 및 수동 마스크 합성 완료!")
         return output_image
 
     def batch_try_on(
@@ -239,7 +273,7 @@ if __name__ == "__main__":
         person_image=test_person,
         mask_image=test_mask,
         clothing_prompt="a blue denim jacket, casual fashion",
-        num_steps=20,
+        num_steps=30,
         seed=42,
     )
 

@@ -60,6 +60,8 @@ def run_fitting(
     target_region,
     style_preset,
     num_steps,
+    strength,
+    controlnet_scale,
     seed,
     lora_path,
 ):
@@ -95,6 +97,8 @@ def run_fitting(
             style_preset=preset,
             seed=int(seed) if seed else None,
             num_steps=int(num_steps),
+            strength=float(strength),
+            controlnet_scale=float(controlnet_scale),
         )
 
         # 결과 이미지 로드
@@ -206,6 +210,16 @@ with gr.Blocks(
                             minimum=10, maximum=50, value=30, step=5,
                             label="추론 스텝 수 (많을수록 품질 좋음, 느림)",
                             elem_id="num_steps",
+                        )
+                        strength = gr.Slider(
+                            minimum=0.1, maximum=1.0, value=0.85, step=0.05,
+                            label="변형 강도 (Denoising Strength)",
+                            info="색상만 바꾸려면 0.4~0.5, 아예 새로운 옷을 입히려면 0.85"
+                        )
+                        controlnet_scale = gr.Slider(
+                            minimum=0.0, maximum=1.0, value=0.5, step=0.05,
+                            label="형태 보존 강도 (ControlNet Canny)",
+                            info="원래 옷의 주름과 형태를 얼마나 유지할지 결정 (0.0 = 미적용)"
                         )
                         seed_input = gr.Number(
                             label="시드 (같은 시드 = 같은 결과, 비워두면 랜덤)",
@@ -346,7 +360,7 @@ with gr.Blocks(
     run_btn.click(
         fn=run_fitting,
         inputs=[person_input, style_input, target_region, style_preset,
-                num_steps, seed_input, lora_path],
+                num_steps, strength, controlnet_scale, seed_input, lora_path],
         outputs=[result_output, mask_output, status_output],
     )
 

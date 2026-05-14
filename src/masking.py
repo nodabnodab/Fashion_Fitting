@@ -1,8 +1,11 @@
 """
-masking.py - YOLO + SAM 기반 자동 의상 마스킹 모듈
+masking.py - SegFormer Human Parsing 기반 자동 의상 마스킹 모듈
 
-역할: 입력 이미지에서 상의/하의/전신 영역을 자동으로 감지하고 마스크를 생성합니다.
-이 마스크를 Inpainting에 전달하면 해당 영역의 옷만 자연스럽게 교체됩니다.
+역할: 입력 이미지에서 픽셀 단위로 18개 신체/의상 부위를 분류(파싱)합니다.
+얼굴, 머리카락, 피부는 철통 방어하여 마스크에서 완전히 제외하고,
+오직 사용자가 교체 원하는 의상 영역만 정밀하게 마스크로 추출합니다.
+
+사용 모델: mattmdjaga/segformer_b2_clothes (HuggingFace)
 """
 
 import numpy as np
@@ -11,39 +14,60 @@ import cv2
 from typing import Optional, Literal
 
 
-# YOLOv8로 감지할 의상 클래스 ID (COCO 기준)
-# 실제 패션 특화 모델 사용 시 클래스 ID가 달라질 수 있음
-FASHION_CLASSES = {
-    "upper_body": ["shirt", "jacket", "hoodie", "top"],
-    "lower_body": ["pants", "skirt", "shorts"],
-    "full_body": ["dress", "jumpsuit"],
+# SegFormer 파싱 모델의 클래스 인덱스 정의 (18개 카테고리)
+PARSING_CLASSES = {
+    0:  "Background",
+    1:  "Hat",
+    2:  "Hair",
+    3:  "Sunglasses",
+    4:  "Upper-clothes",
+    5:  "Skirt",
+    6:  "Pants",
+    7:  "Dress",
+    8:  "Belt",
+    9:  "Left-shoe",
+    10: "Right-shoe",
+    11: "Face",
+    12: "Left-leg",
+    13: "Right-leg",
+    14: "Left-arm",
+    15: "Right-arm",
+    16: "Bag",
+    17: "Scarf",
+}
+
+# 교체 타겟에 따라 마스크로 추출할 클래스 인덱스
+TARGET_CLASSES = {
+    "upper_body": [4, 7],       # 상의, 드레스
+    "lower_body": [5, 6],       # 치마, 바지
+    "full_body":  [4, 5, 6, 7], # 상의 + 하의 + 드레스
 }
 
 
 class FashionMasker:
     """
-    YOLO + SAM을 조합한 패션 의상 마스킹 클래스
+    SegFormer Human Parsing 기반 패션 마스킹 클래스.
+
+    기존 YOLO+SAM의 좌표 기반 접근법을 완전히 폐기하고,
+    픽셀 단위로 신체 부위를 분류하는 Semantic Segmentation으로 대체합니다.
 
     사용 예시:
         masker = FashionMasker()
         mask = masker.get_mask(image, target="upper_body")
-        masked_image = masker.apply_mask_preview(image, mask)
+        preview = masker.apply_mask_preview(image, mask)
     """
 
+    PARSING_MODEL_ID = "mattmdjaga/segformer_b2_clothes"
+
     def __init__(self, device: str = "auto"):
-        """
-        Args:
-            device: "auto" | "cuda" | "cpu"
-                    auto면 GPU 있으면 GPU, 없으면 CPU 사용
-        """
         import torch
         if device == "auto":
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         else:
             self.device = device
 
-        self.yolo_model = None
-        self.sam_model = None
+        self.processor = None
+        self.model = None
         self._models_loaded = False
 
         print(f"[FashionMasker] 디바이스: {self.device}")
@@ -53,189 +77,141 @@ class FashionMasker:
         if self._models_loaded:
             return
 
-        print("[FashionMasker] 모델 로딩 중...")
+        print("[FashionMasker] SegFormer Human Parsing 모델 로딩 중...")
+        print(f"  모델: {self.PARSING_MODEL_ID}")
+        print("  (처음 실행 시 HuggingFace에서 자동 다운로드)")
 
         try:
-            from ultralytics import YOLO
-            # YOLOv8 nano 모델 (가벼움, 포트폴리오용으로 충분)
-            # 추후 패션 특화 모델로 교체 가능
-            self.yolo_model = YOLO("yolov8n-seg.pt")
-            print("[FashionMasker] YOLOv8 로드 완료")
-        except Exception as e:
-            print(f"[FashionMasker] YOLO 로드 실패: {e}")
-            print("  → 'pip install ultralytics' 로 설치하세요")
+            from transformers import SegformerImageProcessor, AutoModelForSemanticSegmentation
+            import torch
 
-        try:
-            from segment_anything import sam_model_registry, SamPredictor
-            import os
-            sam_checkpoint = "models/sam_vit_b_01ec64.pth"  # SAM ViT-B (가벼운 버전)
-            if os.path.exists(sam_checkpoint):
-                sam = sam_model_registry["vit_b"](checkpoint=sam_checkpoint)
-                sam.to(device=self.device)
-                self.sam_model = SamPredictor(sam)
-                print("[FashionMasker] SAM 로드 완료")
-            else:
-                print(f"[FashionMasker] SAM 체크포인트 없음: {sam_checkpoint}")
-                print("  → notebooks/01_setup_test.ipynb 에서 다운로드 방법 확인")
+            self.processor = SegformerImageProcessor.from_pretrained(self.PARSING_MODEL_ID)
+            self.model = AutoModelForSemanticSegmentation.from_pretrained(self.PARSING_MODEL_ID)
+            self.model.to(self.device)
+            self.model.eval()
+            print("[FashionMasker] SegFormer 모델 로드 완료!")
+
         except Exception as e:
-            print(f"[FashionMasker] SAM 로드 실패: {e}")
+            print(f"[FashionMasker] SegFormer 로드 실패: {e}")
+            self.model = None
 
         self._models_loaded = True
 
-    def get_mask_from_yolo(
-        self,
-        image: Image.Image,
-        target: Literal["upper_body", "lower_body", "full_body"] = "upper_body",
-        confidence: float = 0.25,
-    ) -> Optional[np.ndarray]:
+    def _parse_image(self, image: Image.Image) -> Optional[np.ndarray]:
         """
-        [백업 로직] YOLOv8 세그멘테이션으로 인물 전체 영역 감지
-        
-        YOLOv8 COCO 기본 모델은 'person'만 감지 가능하므로, 
-        인물의 대략적인 전체 실루엣을 가져옵니다.
+        이미지를 Human Parsing하여 각 픽셀의 카테고리 레이블 맵을 반환합니다.
+
+        Returns:
+            np.ndarray: (H, W) 크기의 정수 배열, 값은 0~17의 클래스 인덱스
+                        실패 시 None 반환
         """
-        self._load_models()
-        if self.yolo_model is None:
+        if self.model is None:
             return None
 
-        img_array = np.array(image)
-        results = self.yolo_model(img_array, conf=confidence, verbose=False)
+        import torch
 
-        h, w = img_array.shape[:2]
-        combined_mask = np.zeros((h, w), dtype=np.uint8)
-        detected = False
+        # SegFormer 입력 전처리
+        inputs = self.processor(images=image, return_tensors="pt")
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
-        for result in results:
-            if result.masks is None:
-                continue
-            for seg_mask, cls_id in zip(result.masks.data, result.boxes.cls):
-                class_name = self.yolo_model.names[int(cls_id)]
-                # 의상 클래스가 직접 없으므로 인물을 탐색
-                if class_name == "person":
-                    mask_resized = cv2.resize(
-                        seg_mask.cpu().numpy().astype(np.uint8),
-                        (w, h),
-                        interpolation=cv2.INTER_NEAREST,
-                    )
-                    combined_mask = np.maximum(combined_mask, mask_resized * 255)
-                    detected = True
+        with torch.no_grad():
+            outputs = self.model(**inputs)
 
-        if not detected:
-            return None
+        # 로짓에서 픽셀별 클래스 레이블 추출
+        logits = outputs.logits.cpu()  # (1, num_labels, H/4, W/4)
 
-        return combined_mask
+        # 원본 이미지 크기로 업스케일
+        upsampled = torch.nn.functional.interpolate(
+            logits,
+            size=image.size[::-1],  # (H, W)
+            mode="bilinear",
+            align_corners=False,
+        )
+        label_map = upsampled.argmax(dim=1).squeeze().numpy()  # (H, W)
+        return label_map
 
     def get_mask(
         self,
         image: Image.Image,
         target: Literal["upper_body", "lower_body", "full_body"] = "upper_body",
-        use_sam: bool = True,
+        use_sam: bool = False,  # 하위 호환성을 위해 인수는 유지하지만 무시됨
     ) -> Optional[Image.Image]:
         """
-        메인 인터페이스: YOLOv8로 인물 위치를 잡고 SAM 포인트 프롬프트를 사용해 의상을 정밀 격리합니다.
+        SegFormer Human Parsing으로 의상 마스크를 생성합니다.
+
+        - 얼굴(11), 머리카락(2), 피부(팔/다리 12~15)는 절대 마스크에 포함하지 않습니다.
+        - 오직 target에 해당하는 의상 클래스 픽셀만 흰색(255)으로 마스킹합니다.
 
         Args:
             image: PIL Image (RGB)
-            target: 마스킹할 부위 ('upper_body', 'lower_body', 'full_body')
-            use_sam: SAM 사용 유무 (의상 격리를 위해 필수 권장)
+            target: "upper_body" | "lower_body" | "full_body"
 
         Returns:
-            PIL Image 마스크 (L 모드, 흰색=피팅 대상)
+            PIL Image (L 모드, 흰색=교체 대상 영역)
         """
         self._load_models()
-        if self.yolo_model is None:
-            print("[FashionMasker] YOLO 모델 로드 실패.")
+
+        if self.model is None:
+            print("[FashionMasker] SegFormer 사용 불가 - 빈 마스크 반환")
             return None
 
-        img_array = np.array(image.convert("RGB"))
-        h, w = img_array.shape[:2]
+        print(f"[FashionMasker] Human Parsing 시작 ({target})...")
+        label_map = self._parse_image(image.convert("RGB"))
 
-        # 1. YOLO로 가장 뚜렷한 'person' 탐지
-        results = self.yolo_model(img_array, conf=0.25, verbose=False)
-        person_box = None
-        max_area = 0
-
-        for result in results:
-            for box in result.boxes:
-                cls_id = int(box.cls[0])
-                class_name = self.yolo_model.names[cls_id]
-                if class_name == "person":
-                    x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
-                    # 범위를 화면 크기로 제한
-                    x1, x2 = max(0, x1), min(w, x2)
-                    y1, y2 = max(0, y1), min(h, y2)
-                    
-                    area = (x2 - x1) * (y2 - y1)
-                    if area > max_area:
-                        max_area = area
-                        person_box = [x1, y1, x2, y2]
-
-        if person_box is None:
-            print("[FashionMasker] 인물을 찾지 못했습니다. 기본 전신 영역을 가정합니다.")
-            person_box = [int(w * 0.1), int(h * 0.1), int(w * 0.9), int(h * 0.9)]
-
-        x1, y1, x2, y2 = person_box
-        bw, bh = x2 - x1, y2 - y1
-
-        # 2. 타겟 영역에 따른 핵심 힌트 포인트(Point Prompt) 계산
-        prompt_points = []
-        prompt_labels = []
-
-        if target == "upper_body":
-            # 가슴 정중앙 부근 포인트 2개로 안정성 확보
-            prompt_points.append([x1 + int(bw * 0.5), y1 + int(bh * 0.35)])
-            prompt_points.append([x1 + int(bw * 0.5), y1 + int(bh * 0.45)])
-            prompt_labels.extend([1, 1])
-            # 머리 부분 제외 힌트 (Negative prompt)
-            prompt_points.append([x1 + int(bw * 0.5), y1 + int(bh * 0.1)])
-            prompt_labels.append(0)
-
-        elif target == "lower_body":
-            # 허벅지-무릎 사이 정중앙
-            prompt_points.append([x1 + int(bw * 0.5), y1 + int(bh * 0.75)])
-            prompt_points.append([x1 + int(bw * 0.5), y1 + int(bh * 0.85)])
-            prompt_labels.extend([1, 1])
-            # 상체 제외 힌트
-            prompt_points.append([x1 + int(bw * 0.5), y1 + int(bh * 0.35)])
-            prompt_labels.append(0)
-
-        else:  # full_body
-            # 상체, 하체 골고루 힌트
-            prompt_points.append([x1 + int(bw * 0.5), y1 + int(bh * 0.4)])
-            prompt_points.append([x1 + int(bw * 0.5), y1 + int(bh * 0.75)])
-            prompt_labels.extend([1, 1])
-
-        # 3. SAM 적용
-        if use_sam and self.sam_model is not None:
-            print(f"[FashionMasker] SAM 포인트 프롬프트 구동 중 ({target})...")
-            self.sam_model.set_image(img_array)
-            
-            input_points = np.array(prompt_points)
-            input_labels = np.array(prompt_labels)
-            
-            # SAM 박스 힌트 제공하여 인물 외부 침범 최소화
-            input_box = np.array([x1, y1, x2, y2])
-
-            masks, scores, _ = self.sam_model.predict(
-                point_coords=input_points,
-                point_labels=input_labels,
-                box=input_box[None, :] if target != "full_body" else None,
-                multimask_output=True,
-            )
-            
-            # 스코어 기반 최적 마스크 추출
-            best_mask = masks[np.argmax(scores)]
-            final_mask = (best_mask * 255).astype(np.uint8)
-            print(f"[FashionMasker] SAM 마스킹 완료 (신뢰도: {max(scores):.3f})")
-            return Image.fromarray(final_mask).convert("L")
-        
-        else:
-            # SAM이 없거나 비활성화 시 YOLO 마스크 대체 시도
-            print("[FashionMasker] SAM을 사용할 수 없어 YOLO 인물 실루엣을 대체 활용합니다.")
-            yolo_mask = self.get_mask_from_yolo(image, confidence=0.25)
-            if yolo_mask is not None:
-                return Image.fromarray(yolo_mask).convert("L")
+        if label_map is None:
+            print("[FashionMasker] Parsing 실패")
             return None
+
+        # 타겟 의상 클래스만 추출
+        target_class_ids = TARGET_CLASSES.get(target, [4])
+        mask = np.zeros(label_map.shape, dtype=np.uint8)
+        for cls_id in target_class_ids:
+            mask[label_map == cls_id] = 255
+
+        # 안전장치: 얼굴(11), 머리카락(2) 픽셀은 마스크에서 무조건 제거
+        # (SegFormer가 이미 분리해주지만, 이중 방어)
+        forbidden_classes = [2, 11]  # Hair, Face
+        for cls_id in forbidden_classes:
+            mask[label_map == cls_id] = 0
+
+        # 마스크가 너무 작으면 (감지 실패) 경고
+        mask_ratio = np.sum(mask > 0) / mask.size
+        if mask_ratio < 0.01:
+            print(f"[FashionMasker] 경고: 의상 마스크 면적이 너무 작음 ({mask_ratio:.2%})")
+            print("  → 다른 각도의 사진이나 더 큰 의상 사진을 사용해보세요.")
+
+        # 마스크 후처리: 노이즈 제거 (Morphological Opening)
+        kernel = np.ones((5, 5), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        # 엣지 부드럽게 (가장자리 픽셀 한두겹 제거로 경계선 깔끔하게)
+        mask = cv2.erode(mask, kernel, iterations=1)
+
+        print(f"[FashionMasker] Human Parsing 완료 (마스크 면적: {mask_ratio:.2%})")
+        return Image.fromarray(mask).convert("L")
+
+    def get_detected_labels(self, image: Image.Image) -> dict:
+        """
+        이미지에서 감지된 모든 의상/신체 부위 레이블을 반환합니다. (디버깅용)
+
+        Returns:
+            dict: {클래스명: 면적_퍼센트} 형태의 딕셔너리
+        """
+        self._load_models()
+        if self.model is None:
+            return {}
+
+        label_map = self._parse_image(image.convert("RGB"))
+        if label_map is None:
+            return {}
+
+        total = label_map.size
+        result = {}
+        for cls_id, cls_name in PARSING_CLASSES.items():
+            count = np.sum(label_map == cls_id)
+            if count > 0:
+                result[cls_name] = round(count / total * 100, 2)
+
+        return dict(sorted(result.items(), key=lambda x: -x[1]))
 
     def apply_mask_preview(
         self, image: Image.Image, mask: Image.Image, alpha: float = 0.5
@@ -250,31 +226,14 @@ class FashionMasker:
         blended = cv2.addWeighted(img_array, 1 - alpha, overlay, alpha, 0)
         return Image.fromarray(blended)
 
-    def _is_target_class(self, class_name: str, target: str) -> bool:
-        """YOLO 클래스명이 목표 의상 부위에 해당하는지 확인 (레거시 호환)"""
-        return class_name == "person"
 
-
-# ─────────────────────────────────────────────
-# 직접 실행 테스트용
-# ─────────────────────────────────────────────
 if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) < 2:
-        print("사용법: python masking.py <이미지 경로>")
-        print("예시: python masking.py data/test_images/person.jpg")
-        sys.exit(1)
-
-    image_path = sys.argv[1]
-    image = Image.open(image_path).convert("RGB")
-
+    """빠른 테스트 실행"""
+    print("=== FashionMasker SegFormer 테스트 ===")
     masker = FashionMasker()
-    mask = masker.get_mask(image, target="upper_body")
 
-    if mask:
-        preview = masker.apply_mask_preview(image, mask)
-        preview.save("data/results/mask_preview.jpg")
-        print("마스크 미리보기 저장: data/results/mask_preview.jpg")
-    else:
-        print("마스크 생성 실패")
+    test_image = Image.new("RGB", (512, 512), color=(200, 150, 100))
+    print("\n감지된 레이블:")
+    labels = masker.get_detected_labels(test_image)
+    for name, pct in labels.items():
+        print(f"  {name}: {pct:.2f}%")

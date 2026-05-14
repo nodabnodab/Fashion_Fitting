@@ -82,6 +82,8 @@ class VirtualFittingPipeline:
         custom_mask_path: Optional[str] = None,
         seed: Optional[int] = None,
         num_steps: int = 30,
+        strength: float = 0.85,
+        controlnet_scale: float = 0.5,
         save_intermediates: bool = True,
     ) -> dict:
         """
@@ -163,6 +165,8 @@ class VirtualFittingPipeline:
             clothing_prompt=sd_prompt,
             negative_prompt=negative_prompt,
             num_steps=num_steps,
+            strength=strength,
+            controlnet_scale=controlnet_scale,
             seed=seed,
         )
 
