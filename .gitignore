@@ -1,0 +1,29 @@
+# OS generated files
+Thumbs.db
+db.web
+.DS_Store
+
+# Python Environment
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# Large AI Models (Weights) - Git에 올리면 안되는 수백MB~수GB 파일들
+models/
+*.pt
+*.pth
+*.safetensors
+*.bin
+
+# Datasets and Generated Results
+data/results/
+data/training_processed/
+data/test_images/
+data/input_faces/
+install_log.txt
+
+# IDEs
+.vscode/
+.idea/

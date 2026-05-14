@@ -1,0 +1,36 @@
+# 핵심 AI 패키지
+torch==2.3.0+cu121
+torchvision==0.18.0+cu121
+torchaudio==2.3.0+cu121
+
+# Stable Diffusion 파이프라인
+diffusers==0.27.2
+transformers==4.40.0
+accelerate==0.30.0
+huggingface_hub==0.23.0
+
+# 이미지 처리
+Pillow==10.3.0
+opencv-python-headless==4.9.0.80
+numpy==1.26.4
+scipy==1.13.0
+
+# 세그멘테이션
+ultralytics==8.2.0          # YOLOv8
+segment-anything-py==1.0    # SAM
+
+# IP-Adapter 연동
+einops==0.8.0
+
+# Web UI
+gradio==4.36.0
+
+# LLM API
+google-generativeai==0.7.0
+
+# 유틸리티
+python-dotenv==1.0.1
+tqdm==4.66.4
+matplotlib==3.9.0
+jupyter==1.0.0
+ipykernel==6.29.4
