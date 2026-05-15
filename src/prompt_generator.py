@@ -133,6 +133,24 @@ class PromptGenerator:
             if k in user_lower:
                 keywords.append(v)
 
+        # 색상 감지 (API 실패 시 대비)
+        color_map = {
+            "빨간": "red", "빨강": "red", "레드": "red",
+            "파란": "blue", "파랑": "blue", "블루": "blue",
+            "초록": "green", "그린": "green",
+            "노란": "yellow", "노랑": "yellow", "옐로우": "yellow",
+            "검은": "black", "검정": "black", "블랙": "black",
+            "흰색": "white", "하얀": "white", "화이트": "white",
+            "회색": "grey", "그레이": "grey",
+            "핑크": "pink", "분홍": "pink",
+            "보라": "purple", "퍼플": "purple",
+            "갈색": "brown", "브라운": "brown",
+            "베이지": "beige",
+        }
+        for k, v in color_map.items():
+            if k in user_lower:
+                keywords.append(v)
+
         # 기본 품질 태그
         keywords.extend([
             "high quality", "detailed fabric texture",
